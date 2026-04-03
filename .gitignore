@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments (never commit)
+.venv/
+venv/
+env/
+.env/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# --- Data & large artifacts (do not commit datasets or weights) ---
+# Put local images/masks under data/ (see train.py / infer.py paths).
+data/
+datasets/
+dataset/
+raw/
+
+# Training outputs & checkpoints
+outputs/
+checkpoints/
+weights/
+runs/
+wandb/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.safetensors
+
+# Archives (often datasets)
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Result exports (optional local runs)
+Test Results/
+results/
+predictions/

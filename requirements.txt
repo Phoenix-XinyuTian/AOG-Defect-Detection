@@ -1,0 +1,10 @@
+# Core (UNet1, train, infer, dataset)
+torch>=2.0
+torchvision>=0.15
+opencv-python>=4.8
+numpy>=1.24
+segmentation-models-pytorch>=0.3
+
+# Intensity Detect.py
+matplotlib>=3.7
+scikit-image>=0.22
