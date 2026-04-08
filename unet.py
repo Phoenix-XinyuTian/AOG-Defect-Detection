@@ -17,7 +17,9 @@ class DoubleConv(nn.Module):
         return self.conv(x)
 
 class UNet(nn.Module):
-    """Vanilla U-Net for binary segmentation (1-channel in, 1-channel out)."""
+    """用于二值分割的标准 U-Net（单通道输入，单通道输出）。
+    Vanilla U-Net for binary segmentation (1-channel in, 1-channel out).
+    """
     def __init__(self, base=64):
         super().__init__()
         self.down1 = DoubleConv(1, base)
@@ -63,5 +65,5 @@ class UNet(nn.Module):
         u1 = self.up1(c2)
         c1 = self.conv1(torch.cat([u1, c1], dim=1))
 
-        logits = self.out(c1)  # NOTE: logits, no sigmoid here
+        logits = self.out(c1)  # 输出原始 logits，不含 sigmoid / Output raw logits, no sigmoid here
         return logits

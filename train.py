@@ -16,12 +16,12 @@ def set_seed(seed=42):
 def main():
     set_seed(42)
 
-    # ======= paths =======
+    # ======= 路径配置 / Paths =======
     images_dir = "data/images"
     masks_dir  = "data/masks"
     os.makedirs("outputs", exist_ok=True)
 
-    # ======= hyperparams =======
+    # ======= 超参数配置 / Hyperparameters =======
     img_size = 256
     batch_size = 4
     epochs = 30
@@ -40,14 +40,14 @@ def main():
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False)
 
-    model = UNet(base=32).to(device)  # base=32: lighter model for faster runs
+    model = UNet(base=32).to(device)  # base=32: 轻量化模型，加快训练 / Lighter model for faster runs
     criterion = nn.BCEWithLogitsLoss()
     optim = torch.optim.Adam(model.parameters(), lr=lr)
 
     best_val_dice = -1.0
 
     for ep in range(1, epochs + 1):
-        # ---- train ----
+        # ---- 训练阶段 / Train ----
         model.train()
         total_loss = 0.0
         for img, mask, _ in train_loader:
@@ -61,7 +61,7 @@ def main():
 
         train_loss = total_loss / max(1, len(train_loader))
 
-        # ---- val ----
+        # ---- 验证阶段 / Validation ----
         model.eval()
         val_loss = 0.0
         dices, ious = [], []
@@ -81,7 +81,7 @@ def main():
 
         print(f"Epoch {ep:02d}/{epochs} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | Dice={val_dice:.4f} | IoU={val_iou:.4f}")
 
-        # ---- save best ----
+        # ---- 保存最佳模型 / Save best model ----
         if val_dice > best_val_dice:
             best_val_dice = val_dice
             torch.save(model.state_dict(), "outputs/unet_best.pth")

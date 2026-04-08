@@ -30,7 +30,7 @@ class SEMSegDataset(Dataset):
 
         img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
         img = img.astype(np.float32) / 255.0
-        img = torch.from_numpy(img).unsqueeze(0)  # [1,H,W]
+        img = torch.from_numpy(img).unsqueeze(0)  # 增加通道维度 [1,H,W] / Add channel dimension [1,H,W]
 
         if self.masks_dir is None:
             return img, name
@@ -41,7 +41,7 @@ class SEMSegDataset(Dataset):
             raise RuntimeError(f"GT mask not found: {mask_path}")
 
         mask = cv2.resize(mask, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
-        mask = (mask > 0).astype(np.float32)  # {0,1}
-        mask = torch.from_numpy(mask).unsqueeze(0)  # [1,H,W]
+        mask = (mask > 0).astype(np.float32)  # 二值化掩码 {0,1} / Binarize mask to {0,1}
+        mask = torch.from_numpy(mask).unsqueeze(0)  # 增加通道维度 [1,H,W] / Add channel dimension [1,H,W]
 
         return img, mask, name
