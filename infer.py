@@ -5,7 +5,7 @@ import numpy as np
 
 from unet import UNet
 from dataset import SEMSegDataset
-from metrics import dice_iou_from_logits
+from metrics import dice_iou_from_logits, f1_precision_recall_from_logits
 
 def save_overlay(gray01, pred01, out_path, alpha=0.5):
     """
@@ -41,7 +41,7 @@ def main():
 
     if has_gt:
         ds = SEMSegDataset(images_dir, masks_dir, img_size=img_size)
-        dices, ious = [], []
+        dices, ious, f1s, precs, recs = [], [], [], [], []
         with torch.no_grad():
             for img, mask, name in ds:
                 img_t = img.unsqueeze(0).to(device)   # 扩展 batch 维度 [1,1,H,W] / Add batch dimension [1,1,H,W]
@@ -53,7 +53,9 @@ def main():
 
                 # 计算指标 / Compute metrics
                 d, j = dice_iou_from_logits(logits, mask_t, thr=thr)
+                f1, prec, rec = f1_precision_recall_from_logits(logits, mask_t, thr=thr)
                 dices.append(d); ious.append(j)
+                f1s.append(f1); precs.append(prec); recs.append(rec)
 
                 # 保存预测掩码 / Save predicted mask
                 cv2.imwrite(f"outputs/preds/{os.path.splitext(name)[0]}_pred.png", pred*255)
@@ -62,7 +64,8 @@ def main():
                 gray01 = img[0].cpu().numpy()
                 save_overlay(gray01, pred, f"outputs/overlays/{os.path.splitext(name)[0]}_overlay.png")
 
-        print(f"Test on labeled set: Dice={sum(dices)/len(dices):.4f} | IoU={sum(ious)/len(ious):.4f}")
+        print(f"Test on labeled set: Dice={sum(dices)/len(dices):.4f} | IoU={sum(ious)/len(ious):.4f} "
+              f"| F1={sum(f1s)/len(f1s):.4f} | Prec={sum(precs)/len(precs):.4f} | Rec={sum(recs)/len(recs):.4f}")
 
     else:
         ds = SEMSegDataset(images_dir, masks_dir=None, img_size=img_size)
