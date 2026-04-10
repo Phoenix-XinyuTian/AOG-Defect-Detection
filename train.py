@@ -37,8 +37,13 @@ def main():
     split = int(n * (1 - val_ratio))
     train_idx, val_idx = idxs[:split], idxs[split:]
 
-    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False)
+    # 训练集启用数据增强，验证集不启用，确保评估指标可靠
+    # Training set uses augmentation; validation set does not for reliable evaluation
+    train_dataset = SEMSegDataset(images_dir, masks_dir, img_size=img_size, augment=True)
+    val_dataset   = SEMSegDataset(images_dir, masks_dir, img_size=img_size, augment=False)
+
+    train_loader = DataLoader(Subset(train_dataset, train_idx), batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(Subset(val_dataset,   val_idx),   batch_size=batch_size, shuffle=False)
 
     model = UNet(base=32).to(device)  # base=32: 轻量化模型，加快训练 / Lighter model for faster runs
     criterion = nn.BCEWithLogitsLoss()

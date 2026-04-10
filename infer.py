@@ -41,7 +41,13 @@ def main():
 
     if has_gt:
         ds = SEMSegDataset(images_dir, masks_dir, img_size=img_size)
-        dices, ious, f1s, precs, recs = [], [], [], [], []
+        dices, ious, f1s, precs, recs, aog_areas = [], [], [], [], [], []
+
+        # 逐图结果表头 / Per-image results table header
+        print("\n" + "=" * 95)
+        print(f"{'Filename':<30} | {'IoU':<8} | {'Dice':<8} | {'F1':<8} | {'Prec':<8} | {'Rec':<8} | {'AOG area %':<10}")
+        print("-" * 95)
+
         with torch.no_grad():
             for img, mask, name in ds:
                 img_t = img.unsqueeze(0).to(device)   # 扩展 batch 维度 [1,1,H,W] / Add batch dimension [1,1,H,W]
@@ -54,8 +60,16 @@ def main():
                 # 计算指标 / Compute metrics
                 d, j = dice_iou_from_logits(logits, mask_t, thr=thr)
                 f1, prec, rec = f1_precision_recall_from_logits(logits, mask_t, thr=thr)
+
+                # AOG 面积占比 / AOG area fraction
+                aog_area = (pred.sum() / pred.size) * 100
+
                 dices.append(d); ious.append(j)
                 f1s.append(f1); precs.append(prec); recs.append(rec)
+                aog_areas.append(aog_area)
+
+                # 逐图输出一行 / Print per-image row
+                print(f"{os.path.splitext(name)[0]:<30} | {j:.4f}   | {d:.4f}   | {f1:.4f}   | {prec:.4f}   | {rec:.4f}   | {aog_area:>8.2f}%")
 
                 # 保存预测掩码 / Save predicted mask
                 cv2.imwrite(f"outputs/preds/{os.path.splitext(name)[0]}_pred.png", pred*255)
@@ -64,8 +78,12 @@ def main():
                 gray01 = img[0].cpu().numpy()
                 save_overlay(gray01, pred, f"outputs/overlays/{os.path.splitext(name)[0]}_overlay.png")
 
-        print(f"Test on labeled set: Dice={sum(dices)/len(dices):.4f} | IoU={sum(ious)/len(ious):.4f} "
-              f"| F1={sum(f1s)/len(f1s):.4f} | Prec={sum(precs)/len(precs):.4f} | Rec={sum(recs)/len(recs):.4f}")
+        # 汇总均值 / Summary
+        n = len(dices)
+        print("-" * 95)
+        print(f"{'Mean (all images)':<30} | {sum(ious)/n:.4f}   | {sum(dices)/n:.4f}   | "
+              f"{sum(f1s)/n:.4f}   | {sum(precs)/n:.4f}   | {sum(recs)/n:.4f}   | {sum(aog_areas)/n:>8.2f}%")
+        print("=" * 95)
 
     else:
         ds = SEMSegDataset(images_dir, masks_dir=None, img_size=img_size)
