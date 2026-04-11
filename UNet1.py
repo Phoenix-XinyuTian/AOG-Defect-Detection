@@ -162,11 +162,12 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
 
     total_metrics = {"iou": 0, "dice": 0, "prec": 0, "rec": 0, "f1": 0}
     count = 0
+    total_aog_count = 0
 
-    print("\n" + "=" * 95)
+    print("\n" + "=" * 108)
     # 表头 / Table header
-    print(f"{'Filename':<30} | {'IoU':<8} | {'Dice':<8} | {'F1':<8} | {'Prec':<8} | {'Rec':<8} | {'AOG area %':<10}")
-    print("-" * 95)
+    print(f"{'Filename':<30} | {'IoU':<8} | {'Dice':<8} | {'F1':<8} | {'Prec':<8} | {'Rec':<8} | {'AOG area %':<10} | {'AOG count':<9}")
+    print("-" * 108)
 
     for img_name in img_list:
         img_path = os.path.join(input_folder, img_name)
@@ -208,8 +209,12 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
         # 4. 当前图像的 AOG 面积占比 / AOG area fraction for this image
         aog_area = (np.count_nonzero(res_mask) / res_mask.size) * 100
 
+        # AOG 连通域计数 / Count distinct AOG connected regions
+        num_labels, _ = cv2.connectedComponents(res_mask)
+        aog_count = num_labels - 1  # 减去背景标签 / subtract background label
+
         # 5. 输出每张图像结果行 / Per-image result row
-        print(f"{img_name:<30} | {iou:.4f}   | {dice:.4f}   | {f1:.4f}   | {prec:.4f}   | {rec:.4f}   | {aog_area:>8.2f}%")
+        print(f"{img_name:<30} | {iou:.4f}   | {dice:.4f}   | {f1:.4f}   | {prec:.4f}   | {rec:.4f}   | {aog_area:>8.2f}%   | {aog_count:>9d}")
 
         # 累加全数据集均値 / Accumulate for mean over dataset
         total_metrics["iou"]  += iou
@@ -217,6 +222,7 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
         total_metrics["prec"] += prec
         total_metrics["rec"]  += rec
         total_metrics["f1"]   += f1
+        total_aog_count += aog_count
         count += 1
 
         # 保存预测掩码 / Save predicted mask
@@ -232,11 +238,11 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
 
     # 6. 汇总统计 / Summary
     if count > 0:
-        print("-" * 95)
+        print("-" * 108)
         print(f"{'Mean (all images)':<30} | {total_metrics['iou']/count:.4f}   | {total_metrics['dice']/count:.4f}   | "
               f"{total_metrics['f1']/count:.4f}   | {total_metrics['prec']/count:.4f}   | "
-              f"{total_metrics['rec']/count:.4f}   | -")
-        print("=" * 95)
+              f"{total_metrics['rec']/count:.4f}   | -          | {total_aog_count/count:>9.1f}")
+        print("=" * 108)
     else:
         print("No matching image pairs found.")
 
@@ -253,8 +259,19 @@ if __name__ == "__main__":
     test_imgs = '/Users/phoenix/Desktop/AOGs Detection/Train and Test/test/images/'
     test_gt = '/Users/phoenix/Desktop/AOGs Detection/Train and Test/test/GT/'
 
-    # 预测结果输出目录 / Output directory for predictions
-    result_folder = '/Users/phoenix/Desktop/AOGs Detection/Test Results/410 epoch100/'
+    # --- 第三步：交互式输入结果文件夹名 / Step 3: interactive result folder name input ---
+    base_results_dir = '/Users/phoenix/Desktop/AOGs Detection/Test Results/'
+    print("=" * 60)
+    print("请输入本次实验的结果文件夹名称（例如：411 epoch100）")
+    print("Enter the result folder name for this run (e.g. 411 epoch100):")
+    run_name = input(">>> ").strip()
+    if not run_name:
+        run_name = "unnamed_run"
+        print(f"  ⚠️  未输入名称，使用默认名称: {run_name}")
+        print(f"  ⚠️  No name entered, using default: {run_name}")
+    result_folder = os.path.join(base_results_dir, run_name) + '/'
+    print(f"  ✓ 结果将保存到 / Results will be saved to: {result_folder}")
+    print("=" * 60)
     # ------------------------------------------------------------
 
     # 1. 仅在训练集上训练 / Train on training set only

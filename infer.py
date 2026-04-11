@@ -5,7 +5,7 @@ import numpy as np
 
 from unet import UNet
 from dataset import SEMSegDataset
-from metrics import dice_iou_from_logits, f1_precision_recall_from_logits
+from metrics import dice_iou_from_logits, f1_precision_recall_from_logits, count_aog_regions
 
 def save_overlay(gray01, pred01, out_path, alpha=0.5):
     """
@@ -41,12 +41,12 @@ def main():
 
     if has_gt:
         ds = SEMSegDataset(images_dir, masks_dir, img_size=img_size)
-        dices, ious, f1s, precs, recs, aog_areas = [], [], [], [], [], []
+        dices, ious, f1s, precs, recs, aog_areas, aog_counts = [], [], [], [], [], [], []
 
         # 逐图结果表头 / Per-image results table header
-        print("\n" + "=" * 95)
-        print(f"{'Filename':<30} | {'IoU':<8} | {'Dice':<8} | {'F1':<8} | {'Prec':<8} | {'Rec':<8} | {'AOG area %':<10}")
-        print("-" * 95)
+        print("\n" + "=" * 108)
+        print(f"{'Filename':<30} | {'IoU':<8} | {'Dice':<8} | {'F1':<8} | {'Prec':<8} | {'Rec':<8} | {'AOG area %':<10} | {'AOG count':<9}")
+        print("-" * 108)
 
         with torch.no_grad():
             for img, mask, name in ds:
@@ -64,12 +64,15 @@ def main():
                 # AOG 面积占比 / AOG area fraction
                 aog_area = (pred.sum() / pred.size) * 100
 
+                # AOG 连通域计数 / Count distinct AOG connected regions
+                aog_count = count_aog_regions((pred * 255).astype(np.uint8))
+
                 dices.append(d); ious.append(j)
                 f1s.append(f1); precs.append(prec); recs.append(rec)
-                aog_areas.append(aog_area)
+                aog_areas.append(aog_area); aog_counts.append(aog_count)
 
                 # 逐图输出一行 / Print per-image row
-                print(f"{os.path.splitext(name)[0]:<30} | {j:.4f}   | {d:.4f}   | {f1:.4f}   | {prec:.4f}   | {rec:.4f}   | {aog_area:>8.2f}%")
+                print(f"{os.path.splitext(name)[0]:<30} | {j:.4f}   | {d:.4f}   | {f1:.4f}   | {prec:.4f}   | {rec:.4f}   | {aog_area:>8.2f}%   | {aog_count:>9d}")
 
                 # 保存预测掩码 / Save predicted mask
                 cv2.imwrite(f"outputs/preds/{os.path.splitext(name)[0]}_pred.png", pred*255)
@@ -80,10 +83,10 @@ def main():
 
         # 汇总均值 / Summary
         n = len(dices)
-        print("-" * 95)
+        print("-" * 108)
         print(f"{'Mean (all images)':<30} | {sum(ious)/n:.4f}   | {sum(dices)/n:.4f}   | "
-              f"{sum(f1s)/n:.4f}   | {sum(precs)/n:.4f}   | {sum(recs)/n:.4f}   | {sum(aog_areas)/n:>8.2f}%")
-        print("=" * 95)
+              f"{sum(f1s)/n:.4f}   | {sum(precs)/n:.4f}   | {sum(recs)/n:.4f}   | {sum(aog_areas)/n:>8.2f}%   | {sum(aog_counts)/n:>9.1f}")
+        print("=" * 108)
 
     else:
         ds = SEMSegDataset(images_dir, masks_dir=None, img_size=img_size)

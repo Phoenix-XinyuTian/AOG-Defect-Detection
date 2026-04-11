@@ -1,4 +1,5 @@
 import torch
+import cv2
 
 def dice_iou_from_logits(logits, target, thr=0.5, eps=1e-7):
     """
@@ -55,3 +56,15 @@ def area_ratio_from_mask(mask01):
     returns mean area ratio in batch
     """
     return mask01.mean().item()  # 像素均値即等于白色像素占比 / Pixel mean equals foreground ratio
+
+def count_aog_regions(pred_uint8):
+    """
+    计算预测掩码中 AOG 连通域（独立晶粒）的数量。
+    Count the number of connected AOG regions (individual grains) in a predicted mask.
+    pred_uint8: [H,W] uint8，值为 0 或 255 / uint8 array with values 0 or 255
+    返回 / Returns: int — AOG 区域数量 / number of distinct AOG regions
+    """
+    # connectedComponents 返回 (数量, 标签图)，背景标签为 0 需减去
+    # connectedComponents returns (count, label_map); subtract 1 to exclude background label
+    num_labels, _ = cv2.connectedComponents(pred_uint8)
+    return num_labels - 1  # 减去背景 / subtract background
