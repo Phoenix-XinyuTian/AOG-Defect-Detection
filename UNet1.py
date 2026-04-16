@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 import segmentation_models_pytorch as smp
 
+EVAL_THRESHOLD = 0.4
+
 
 # ================= 1. 数据集 / Dataset =================
 class AOGDataset(Dataset):
@@ -116,7 +118,7 @@ def train_model(model, train_loader, val_loader=None, epochs=20):
                     preds = model(images).squeeze(1).cpu().numpy()  # 概率图 / probability maps
                     masks_np = masks.squeeze(1).numpy()
                     for p, g in zip(preds, masks_np):
-                        pred_mask = (p > 0.5).astype(np.uint8) * 255
+                        pred_mask = (p > EVAL_THRESHOLD).astype(np.uint8) * 255
                         gt_mask   = (g * 255).astype(np.uint8)
                         iou, dice, prec, rec, f1 = calculate_metrics(pred_mask, gt_mask)
                         val_ious.append(iou); val_dices.append(dice)
@@ -196,7 +198,7 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
 
 
         # 2. 二值化掩码 / Binary mask
-        res_mask = (pred > 0.4).astype(np.uint8) * 255
+        res_mask = (pred > EVAL_THRESHOLD).astype(np.uint8) * 255
         # 二值化阈値，可根据 precision/recall 调整 / Binarization threshold; tune using precision/recall
 
 
