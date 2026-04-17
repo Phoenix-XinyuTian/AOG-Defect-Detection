@@ -1,5 +1,6 @@
 import os
 import random
+import json
 from datetime import datetime
 import torch
 import torch.nn as nn
@@ -26,8 +27,28 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+
+def save_experiment_config(output_folder, config):
+    os.makedirs(output_folder, exist_ok=True)
+    cfg_path = os.path.join(output_folder, "experiment_config.json")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    print(f"Saved config: {cfg_path}")
+
+
+def bce_dice_loss(prob, target, eps=1e-6):
+    """Binary segmentation combined loss: BCE + Dice."""
+    bce = nn.functional.binary_cross_entropy(prob, target)
+    prob_f = prob.view(prob.size(0), -1)
+    tgt_f = target.view(target.size(0), -1)
+    inter = (prob_f * tgt_f).sum(dim=1)
+    dice = (2.0 * inter + eps) / (prob_f.sum(dim=1) + tgt_f.sum(dim=1) + eps)
+    dice_loss = 1.0 - dice.mean()
+    return bce + dice_loss
+
 def main():
-    set_seed(42)
+    seed = 42
+    set_seed(seed)
 
     # ======= 路径配置 / Paths =======
     images_dir = "/Users/phoenix/Desktop/AOGs Detection/Train and Test/train/images/"
@@ -60,17 +81,62 @@ def main():
 
     # 训练集启用数据增强，验证集不启用，确保评估指标可靠
     # Training set uses augmentation; validation set does not for reliable evaluation
-    train_dataset = SEMSegDataset(images_dir, masks_dir, img_size=img_size, augment=False)
+    train_dataset = SEMSegDataset(images_dir, masks_dir, img_size=img_size, augment=True)
     val_dataset   = SEMSegDataset(images_dir, masks_dir, img_size=img_size, augment=False)
 
     train_loader = DataLoader(Subset(train_dataset, train_idx), batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(Subset(val_dataset,   val_idx),   batch_size=batch_size, shuffle=False)
 
+    run_name = f"unet_train_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    result_folder = os.path.join("outputs", "unet_results", run_name)
+
+    experiment_config = {
+        "script": "train.py",
+        "model": {
+            "name": "UNet",
+            "backbone": "none",
+            "base_channels": 32,
+            "in_channels": 1,
+            "out_channels": 1,
+        },
+        "training": {
+            "seed": seed,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": lr,
+            "optimizer": "Adam",
+            "loss": "BCE + Dice (on sigmoid(logits))",
+            "eval_threshold": EVAL_THRESHOLD,
+            "val_ratio": val_ratio,
+            "train_augment": True,
+            "val_augment": False,
+            "device": str(device),
+        },
+        "data": {
+            "train_images_dir": images_dir,
+            "train_masks_dir": masks_dir,
+            "test_images_dir": test_images_dir,
+            "test_masks_dir": test_masks_dir,
+            "img_size": img_size,
+            "num_total_samples": n,
+            "num_train_samples": len(train_idx),
+            "num_val_samples": len(val_idx),
+            "split_indices_seeded_shuffle": True,
+            "preprocess": "median blur + CLAHE",
+        },
+        "outputs": {
+            "result_folder": result_folder,
+            "best_weight_path": os.path.join(result_folder, "best_model_unet.pth"),
+        },
+    }
+    save_experiment_config(result_folder, experiment_config)
+
     model = UNet(base=32).to(device)  # base=32: 轻量化模型，加快训练 / Lighter model for faster runs
-    criterion = nn.BCELoss()
+    criterion = bce_dice_loss
     optim = torch.optim.Adam(model.parameters(), lr=lr)
 
     best_val_dice = -1.0
+    best_ckpt_path = os.path.join(result_folder, "best_model_unet.pth")
 
     for ep in range(1, epochs + 1):
         # ---- 训练阶段 / Train ----
@@ -121,17 +187,16 @@ def main():
         # ---- 保存最佳模型 / Save best model ----
         if val_dice > best_val_dice:
             best_val_dice = val_dice
-            torch.save(model.state_dict(), "outputs/unet_best.pth")
-            print("  ✓ Saved: outputs/unet_best.pth")
+            torch.save(model.state_dict(), best_ckpt_path)
+            torch.save(model.state_dict(), "outputs/unet_best.pth")  # backward compatibility for infer.py
+            print(f"  ✓ Saved best: {best_ckpt_path}")
 
     print(f"Done. Best val Dice = {best_val_dice:.4f}")
 
     # ---- 测试集评估并导出与 UNet1 对齐的结果 / Test-set evaluation with UNet1-style outputs ----
     if os.path.isdir(test_images_dir) and os.path.isdir(test_masks_dir):
         best_model = UNet(base=32).to(device)
-        best_model.load_state_dict(torch.load("outputs/unet_best.pth", map_location=device))
-        run_name = f"train_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        result_folder = os.path.join("outputs", "unet_results", run_name)
+        best_model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
         batch_process_and_evaluate(
             best_model,
             test_images_dir,

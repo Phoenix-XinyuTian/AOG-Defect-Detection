@@ -2,14 +2,16 @@ import os
 import random
 import json
 from datetime import datetime
+
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, Subset
-import cv2
-import numpy as np
-import matplotlib.pyplot as plt
-import segmentation_models_pytorch as smp
+
 
 EVAL_THRESHOLD = 0.4
 
@@ -22,10 +24,9 @@ def save_experiment_config(output_folder, config):
     print(f"Saved config: {cfg_path}")
 
 
-# ================= 1. 数据集 / Dataset =================
 class AOGDataset(Dataset):
     def __init__(self, img_dir, mask_dir, img_size=(256, 256), augment=False):
-        valid_extensions = ('.png', '.jpg', '.jpeg', '.tif', '.bmp')
+        valid_extensions = (".png", ".jpg", ".jpeg", ".tif", ".bmp")
         self.img_names = sorted([
             f for f in os.listdir(img_dir)
             if f.lower().endswith(valid_extensions)
@@ -34,7 +35,6 @@ class AOGDataset(Dataset):
         self.mask_dir = mask_dir
         self.img_size = img_size
         self.augment = augment
-        # CLAHE 与主管线保持一致 / CLAHE consistent with main pipeline
         self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     def __len__(self):
@@ -43,24 +43,24 @@ class AOGDataset(Dataset):
     def __getitem__(self, idx):
         img_name = self.img_names[idx]
         img_path = os.path.join(self.img_dir, img_name)
-        # 掩码文件名统一使用 .png 扩展名 / Mask filename always uses .png extension
         mask_path = os.path.join(self.mask_dir, os.path.splitext(img_name)[0] + ".png")
+
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if image is None or mask is None: raise FileNotFoundError(f"Failed to load: {img_name}")
+        if image is None or mask is None:
+            raise FileNotFoundError(f"Failed to load: {img_name}")
+
         image = cv2.resize(image, self.img_size)
         mask = cv2.resize(mask, self.img_size, interpolation=cv2.INTER_NEAREST)
 
-        # 与主管线一致的预处理：中值滤波 + CLAHE（逐通道）
-        # Preprocessing consistent with main pipeline: median blur + CLAHE (per channel)
+        # Keep existing preprocessing: resize -> median blur -> CLAHE
         image_proc = np.zeros_like(image)
         for c in range(3):
             ch = cv2.medianBlur(image[:, :, c], 3)
             image_proc[:, :, c] = self._clahe.apply(ch)
         image = image_proc
 
-        # ---- 训练集专用增强 / Training-only augmentation ----
-        # 仅对训练样本启用，且对 image/mask 执行完全相同的几何变换。
+        # Training-only geometric augmentation (shared transform for image/mask)
         if self.augment:
             if random.random() < 0.5:
                 image = cv2.flip(image, 1)
@@ -69,18 +69,17 @@ class AOGDataset(Dataset):
                 image = cv2.flip(image, 0)
                 mask = cv2.flip(mask, 0)
             if random.random() < 0.5:
-                k = random.randint(1, 3)  # 1/2/3 -> 90/180/270 degrees
+                k = random.randint(1, 3)
                 image = np.ascontiguousarray(np.rot90(image, k=k))
                 mask = np.ascontiguousarray(np.rot90(mask, k=k))
 
         image = image.transpose(2, 0, 1) / 255.0
-        # 保持掩码二值 / Keep mask binary after augmentation
         mask = (mask > 0).astype(np.float32)
         mask = np.expand_dims(mask, axis=0)
+
         return torch.tensor(image, dtype=torch.float32), torch.tensor(mask, dtype=torch.float32)
 
 
-# ================= 2. 评价指标 / Metrics =================
 def calculate_metrics(pred_mask, gt_mask):
     pred = (pred_mask > 0).astype(np.uint8).flatten()
     gt = (gt_mask > 0).astype(np.uint8).flatten()
@@ -88,39 +87,31 @@ def calculate_metrics(pred_mask, gt_mask):
     pred_area = np.sum(pred)
     gt_area = np.sum(gt)
     eps = 1e-6
+
     iou = (intersection + eps) / (pred_area + gt_area - intersection + eps)
     dice = (2.0 * intersection + eps) / (pred_area + gt_area + eps)
     precision = (intersection + eps) / (pred_area + eps)
     recall = (intersection + eps) / (gt_area + eps)
-    f1 = (2.0 * precision * recall) / (precision + recall + eps)  # F1-score
+    f1 = (2.0 * precision * recall) / (precision + recall + eps)
     return iou, dice, precision, recall, f1
 
 
 def bce_dice_loss(prob, target, eps=1e-6):
-        """
-        Binary segmentation combined loss:
-            total_loss = BCE_loss + Dice_loss
+    # BCE part: pixel-wise binary classification
+    bce = nn.functional.binary_cross_entropy(prob, target)
 
-        prob:   model output probabilities, shape [B,1,H,W]
-        target: binary masks in {0,1}, shape [B,1,H,W]
-        """
-        # BCE part: pixel-wise binary classification loss
-        bce = nn.functional.binary_cross_entropy(prob, target)
+    # Dice part: overlap loss for foreground
+    prob_f = prob.view(prob.size(0), -1)
+    tgt_f = target.view(target.size(0), -1)
+    inter = (prob_f * tgt_f).sum(dim=1)
+    dice = (2.0 * inter + eps) / (prob_f.sum(dim=1) + tgt_f.sum(dim=1) + eps)
+    dice_loss = 1.0 - dice.mean()
 
-        # Dice part: overlap loss for foreground regions (1 - Dice coefficient)
-        prob_f = prob.view(prob.size(0), -1)
-        tgt_f = target.view(target.size(0), -1)
-        inter = (prob_f * tgt_f).sum(dim=1)
-        dice = (2.0 * inter + eps) / (prob_f.sum(dim=1) + tgt_f.sum(dim=1) + eps)
-        dice_loss = 1.0 - dice.mean()
-
-        # Final combined loss
-        return bce + dice_loss
+    # Final combined loss
+    return bce + dice_loss
 
 
 def get_device():
-    """优先使用 MPS（Apple GPU），其次 CUDA，最后 CPU。
-    Prefer MPS (Apple GPU), then CUDA, else CPU."""
     if torch.backends.mps.is_available():
         return torch.device("mps")
     if torch.cuda.is_available():
@@ -128,33 +119,27 @@ def get_device():
     return torch.device("cpu")
 
 
-# ================= 3. 模型初始化与训练 / Model init & training =================
-# 注意：模型在入口处创建，避免 import 时触发权重下载
-# Note: model is instantiated in __main__ to avoid downloading weights on import
-
-
-def train_model(model, train_loader, val_loader=None, epochs=20, best_ckpt_path="best_model_unet1.pth"):
+def train_model(model, train_loader, val_loader=None, epochs=20, best_ckpt_path="best_model_unetpp_resnet34.pth"):
     device = get_device()
     if device.type == "mps":
-        print("🚀 Apple Silicon GPU detected, using MPS")
+        print("Apple Silicon GPU detected, using MPS")
     elif device.type == "cuda":
-        print("🚀 NVIDIA GPU detected, using CUDA")
+        print("NVIDIA GPU detected, using CUDA")
     else:
-        print("🐢 No GPU detected, using CPU")
+        print("No GPU detected, using CPU")
+
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     criterion = bce_dice_loss
     print(f"Training on {device}...")
 
-    # ===== Best-model tracking (by validation Dice) =====
-    # 记录整个训练过程中的最佳验证 Dice，并在提升时保存权重。
     best_val_dice = -1.0
     best_epoch = -1
 
     for epoch in range(epochs):
-        # ---- 训练阶段 / Train ----
         model.train()
-        epoch_loss = 0
+        epoch_loss = 0.0
+
         for images, masks in train_loader:
             images, masks = images.to(device), masks.to(device)
             optimizer.zero_grad()
@@ -162,23 +147,26 @@ def train_model(model, train_loader, val_loader=None, epochs=20, best_ckpt_path=
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
+
         train_loss = epoch_loss / len(train_loader)
 
-        # ---- 验证阶段 / Validation ----
         if val_loader is not None:
             model.eval()
             val_dices, val_ious, val_f1s, val_precs, val_recs = [], [], [], [], []
             with torch.no_grad():
                 for images, masks in val_loader:
                     images = images.to(device)
-                    preds = model(images).squeeze(1).cpu().numpy()  # 概率图 / probability maps
+                    preds = model(images).squeeze(1).cpu().numpy()
                     masks_np = masks.squeeze(1).numpy()
                     for p, g in zip(preds, masks_np):
                         pred_mask = (p > EVAL_THRESHOLD).astype(np.uint8) * 255
-                        gt_mask   = (g * 255).astype(np.uint8)
+                        gt_mask = (g * 255).astype(np.uint8)
                         iou, dice, prec, rec, f1 = calculate_metrics(pred_mask, gt_mask)
-                        val_ious.append(iou); val_dices.append(dice)
-                        val_precs.append(prec); val_recs.append(rec); val_f1s.append(f1)
+                        val_ious.append(iou)
+                        val_dices.append(dice)
+                        val_precs.append(prec)
+                        val_recs.append(rec)
+                        val_f1s.append(f1)
 
             val_dice = sum(val_dices) / len(val_dices)
             val_iou = sum(val_ious) / len(val_ious)
@@ -186,39 +174,36 @@ def train_model(model, train_loader, val_loader=None, epochs=20, best_ckpt_path=
             val_prec = sum(val_precs) / len(val_precs)
             val_rec = sum(val_recs) / len(val_recs)
 
-            print(f"Epoch {epoch+1:03d}/{epochs} | train_loss={train_loss:.4f} "
-                  f"| Dice={val_dice:.4f} | IoU={val_iou:.4f} "
-                  f"| F1={val_f1:.4f} | Prec={val_prec:.4f} "
-                  f"| Rec={val_rec:.4f}")
+            print(
+                f"Epoch {epoch + 1:03d}/{epochs} | train_loss={train_loss:.4f} "
+                f"| Dice={val_dice:.4f} | IoU={val_iou:.4f} "
+                f"| F1={val_f1:.4f} | Prec={val_prec:.4f} | Rec={val_rec:.4f}"
+            )
 
-            # ===== Save best checkpoint section =====
-            # 若当前 epoch 的验证 Dice 更高，则保存为最佳模型。
             if val_dice > best_val_dice:
                 best_val_dice = val_dice
                 best_epoch = epoch + 1
                 torch.save(model.state_dict(), best_ckpt_path)
-                print(f"  ✓ New best model saved: {best_ckpt_path} (epoch={best_epoch}, val_dice={best_val_dice:.4f})")
+                print(
+                    f"  New best model saved: {best_ckpt_path} "
+                    f"(epoch={best_epoch}, val_dice={best_val_dice:.4f})"
+                )
         else:
             if (epoch + 1) % 5 == 0:
-                print(f"Epoch {epoch+1}/{epochs}, Loss: {train_loss:.4f}")
+                print(f"Epoch {epoch + 1}/{epochs}, Loss: {train_loss:.4f}")
 
     if val_loader is not None:
         print(f"Training finished. Best val Dice = {best_val_dice:.4f} at epoch {best_epoch:03d}")
     return best_val_dice, best_epoch
 
 
-# ================= 4. 批量推理与逐图结果输出 / Batch inference & per-image output =================
 def _save_overlay(ori_img_bgr, mask_uint8, out_path, alpha=0.5):
-    """
-    将预测掩码以红色叠加到原图上并保存。
-    Overlay the prediction mask in red on the original image and save.
-    """
     overlay = ori_img_bgr.copy()
-    overlay[mask_uint8 > 0] = (0, 0, 255)  # 标红 AOG 区域 / Mark AOG regions red (BGR)
+    overlay[mask_uint8 > 0] = (0, 0, 255)
     blended = cv2.addWeighted(overlay, alpha, ori_img_bgr, 1 - alpha, 0)
     ok = cv2.imwrite(out_path, blended)
     if not ok:
-        print(f"  ⚠️  Failed to save overlay: {out_path}")
+        print(f"Warning: failed to save overlay: {out_path}")
 
 
 def _write_metrics_files(output_folder, rows, summary):
@@ -239,7 +224,6 @@ def _write_metrics_files(output_folder, rows, summary):
 
 
 def _save_pr_curve(y_true, y_score, out_path):
-    """Save pixel-level PR curve from flattened GT labels and probability scores."""
     if y_true.size == 0:
         return
 
@@ -267,7 +251,6 @@ def _save_pr_curve(y_true, y_score, out_path):
 
 
 def _save_confusion_matrix_plot(tp, fp, tn, fn, out_path):
-    """Save confusion matrix heatmap at current evaluation threshold."""
     cm = np.array([[tn, fp], [fn, tp]], dtype=np.int64)
     plt.figure(figsize=(5, 4.5))
     plt.imshow(cm, cmap="Blues")
@@ -286,7 +269,6 @@ def _save_confusion_matrix_plot(tp, fp, tn, fn, out_path):
 
 
 def _write_gt_pred_compare(output_folder, rows):
-    """Save GT-vs-Pred area/count comparison CSV and visualization."""
     compare_csv = os.path.join(output_folder, "gt_pred_area_count_compare.csv")
     compare_png = os.path.join(output_folder, "gt_pred_area_count_compare.png")
 
@@ -333,15 +315,14 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
     model.to(device)
     model.eval()
 
-    # 创建掩码和叠加图输出子目录 / Create subdirs for masks and overlays
-    masks_dir    = os.path.join(output_folder, "masks")
+    masks_dir = os.path.join(output_folder, "masks")
     overlays_dir = os.path.join(output_folder, "overlays")
-    os.makedirs(masks_dir,    exist_ok=True)
+    os.makedirs(masks_dir, exist_ok=True)
     os.makedirs(overlays_dir, exist_ok=True)
-    print(f"Output masks   → {masks_dir}")
-    print(f"Output overlays → {overlays_dir}")
+    print(f"Output masks -> {masks_dir}")
+    print(f"Output overlays -> {overlays_dir}")
 
-    valid_ext = ('.png', '.jpg', '.jpeg', '.tif')
+    valid_ext = (".png", ".jpg", ".jpeg", ".tif")
     img_list = sorted([f for f in os.listdir(input_folder) if f.lower().endswith(valid_ext)])
 
     total_metrics = {"iou": 0, "dice": 0, "prec": 0, "rec": 0, "f1": 0}
@@ -350,56 +331,48 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
     total_gt_aog_count = 0
     rows = []
 
-    # For additional visual analytics
-    all_y_true = []   # flattened GT labels (0/1)
-    all_y_score = []  # flattened probability scores [0,1]
+    all_y_true = []
+    all_y_score = []
     cm_tp = cm_fp = cm_tn = cm_fn = 0
 
     print("\n" + "=" * 108)
-    # 表头 / Table header
-    print(f"{'Filename':<30} | {'IoU':<8} | {'Dice':<8} | {'F1':<8} | {'Prec':<8} | {'Rec':<8} | {'AOG area %':<10} | {'AOG count':<9}")
+    print(
+        f"{'Filename':<30} | {'IoU':<8} | {'Dice':<8} | {'F1':<8} | {'Prec':<8} | {'Rec':<8} | {'AOG area %':<10} | {'AOG count':<9}"
+    )
     print("-" * 108)
 
     for img_name in img_list:
         img_path = os.path.join(input_folder, img_name)
         gt_path = os.path.join(gt_folder, img_name)
-        # GT 掩码统一尝试 .png 扩展名 / Try .png extension for GT mask if not found
         if not os.path.exists(gt_path):
             gt_path = os.path.join(gt_folder, os.path.splitext(img_name)[0] + ".png")
-        if not os.path.exists(gt_path): continue
+        if not os.path.exists(gt_path):
+            continue
 
-        # 1. 模型推理 / Inference
         ori_img = cv2.imread(img_path)
         h, w = ori_img.shape[:2]
         resized = cv2.resize(ori_img, (256, 256))
-        # 推理预处理与训练一致：中值滤波 + CLAHE / Inference preprocessing consistent with training
-        _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         proc = np.zeros_like(resized)
         for c in range(3):
             ch = cv2.medianBlur(resized[:, :, c], 3)
-            proc[:, :, c] = _clahe.apply(ch)
+            proc[:, :, c] = clahe.apply(ch)
+
         img_tensor = proc.transpose(2, 0, 1) / 255.0
         img_tensor = torch.tensor(img_tensor).unsqueeze(0).float().to(device)
 
         with torch.no_grad():
-            pred = model(img_tensor).squeeze().cpu().numpy()
+            pred_prob = model(img_tensor).squeeze().cpu().numpy()
 
-
-
-        # 2. 二值化掩码 / Binary mask
-        res_mask = (pred > EVAL_THRESHOLD).astype(np.uint8) * 255
-        # 二值化阈値，可根据 precision/recall 调整 / Binarization threshold; tune using precision/recall
-
-
+        res_mask = (pred_prob > EVAL_THRESHOLD).astype(np.uint8) * 255
         res_mask = cv2.resize(res_mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
-        # 3. 计算指标 / Metrics
         gt_img = cv2.imread(gt_path, cv2.IMREAD_GRAYSCALE)
         iou, dice, prec, rec, f1 = calculate_metrics(res_mask, gt_img)
 
-        # Pixel-level GT/probability accumulation for PR/CM visualizations
         gt_bin = (gt_img > 0).astype(np.uint8)
-        prob_resized = cv2.resize(pred, (w, h), interpolation=cv2.INTER_LINEAR)
+        prob_resized = cv2.resize(pred_prob, (w, h), interpolation=cv2.INTER_LINEAR)
         all_y_true.append(gt_bin.flatten())
         all_y_score.append(prob_resized.flatten())
 
@@ -409,23 +382,19 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
         cm_tn += int(np.sum((pred_bin == 0) & (gt_bin == 0)))
         cm_fn += int(np.sum((pred_bin == 0) & (gt_bin == 1)))
 
-        # 4. 当前图像的 AOG 面积占比 / AOG area fraction for this image
         aog_area = (np.count_nonzero(res_mask) / res_mask.size) * 100
-
-        # AOG 连通域计数 / Count distinct AOG connected regions
         num_labels, _ = cv2.connectedComponents(res_mask)
-        aog_count = num_labels - 1  # 减去背景标签 / subtract background label
+        aog_count = num_labels - 1
 
-        # GT area/count for GT-vs-Pred comparison
         gt_area = (np.count_nonzero(gt_img) / gt_img.size) * 100
         gt_num_labels, _ = cv2.connectedComponents((gt_img > 0).astype(np.uint8) * 255)
         gt_aog_count = gt_num_labels - 1
 
-        # 5. 输出每张图像结果行 / Per-image result row
-        print(f"{img_name:<30} | {iou:.4f}   | {dice:.4f}   | {f1:.4f}   | {prec:.4f}   | {rec:.4f}   | {aog_area:>8.2f}%   | {aog_count:>9d}")
+        print(
+            f"{img_name:<30} | {iou:.4f}   | {dice:.4f}   | {f1:.4f}   | {prec:.4f}   | {rec:.4f}   | {aog_area:>8.2f}%   | {aog_count:>9d}"
+        )
 
         stem = os.path.splitext(img_name)[0]
-
         rows.append({
             "filename": stem,
             "iou": iou,
@@ -439,36 +408,35 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
             "gt_aog_count": gt_aog_count,
         })
 
-        # 累加全数据集均値 / Accumulate for mean over dataset
-        total_metrics["iou"]  += iou
+        total_metrics["iou"] += iou
         total_metrics["dice"] += dice
         total_metrics["prec"] += prec
-        total_metrics["rec"]  += rec
-        total_metrics["f1"]   += f1
+        total_metrics["rec"] += rec
+        total_metrics["f1"] += f1
         total_aog_count += aog_count
         total_gt_aog_count += gt_aog_count
         count += 1
 
-        # 保存预测掩码 / Save predicted mask
         mask_out = os.path.join(masks_dir, f"{stem}_pred.png")
         ok = cv2.imwrite(mask_out, res_mask)
         if not ok:
-            print(f"  ⚠️  Failed to save mask: {mask_out}")
+            print(f"Warning: failed to save mask: {mask_out}")
 
-        # 保存叠加可视化图 / Save overlay visualization
         overlay_out = os.path.join(overlays_dir, f"{stem}_overlay.png")
         _save_overlay(ori_img, res_mask, overlay_out)
 
-    # 6. 汇总统计 / Summary
     if count > 0:
         print("-" * 108)
-        print(f"{'Mean (all images)':<30} | {total_metrics['iou']/count:.4f}   | {total_metrics['dice']/count:.4f}   | "
-              f"{total_metrics['f1']/count:.4f}   | {total_metrics['prec']/count:.4f}   | "
-              f"{total_metrics['rec']/count:.4f}   | -          | {total_aog_count/count:>9.1f}")
+        print(
+            f"{'Mean (all images)':<30} | {total_metrics['iou']/count:.4f}   | {total_metrics['dice']/count:.4f}   | "
+            f"{total_metrics['f1']/count:.4f}   | {total_metrics['prec']/count:.4f}   | "
+            f"{total_metrics['rec']/count:.4f}   | -          | {total_aog_count/count:>9.1f}"
+        )
         print("=" * 108)
 
         summary = {
-            "model": "UNet1_smp_Unet_resnet34",
+            # UNet++ specific model label
+            "model": "UNetPP_resnet34",
             "num_images": count,
             "mean_iou": f"{total_metrics['iou']/count:.6f}",
             "mean_dice": f"{total_metrics['dice']/count:.6f}",
@@ -480,13 +448,15 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
             "threshold": EVAL_THRESHOLD,
             "image_size": 256,
         }
+
         _write_metrics_files(output_folder, rows, summary)
 
-        # Save additional visualization metrics
         y_true = np.concatenate(all_y_true).astype(np.uint8)
         y_score = np.concatenate(all_y_score).astype(np.float32)
         _save_pr_curve(y_true, y_score, os.path.join(output_folder, "pr_curve.png"))
-        _save_confusion_matrix_plot(cm_tp, cm_fp, cm_tn, cm_fn, os.path.join(output_folder, "confusion_matrix.png"))
+        _save_confusion_matrix_plot(
+            cm_tp, cm_fp, cm_tn, cm_fn, os.path.join(output_folder, "confusion_matrix.png")
+        )
 
         with open(os.path.join(output_folder, "confusion_matrix.txt"), "w", encoding="utf-8") as f:
             f.write(f"TN: {cm_tn}\n")
@@ -498,67 +468,72 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
 
         print(f"Saved PR curve: {os.path.join(output_folder, 'pr_curve.png')}")
         print(f"Saved confusion matrix: {os.path.join(output_folder, 'confusion_matrix.png')}")
-        print(f"Saved GT-vs-Pred area/count comparison: {os.path.join(output_folder, 'gt_pred_area_count_compare.png')}")
+        print(
+            f"Saved GT-vs-Pred area/count comparison: {os.path.join(output_folder, 'gt_pred_area_count_compare.png')}"
+        )
         print(f"Saved metrics: {os.path.join(output_folder, 'metrics_per_image.csv')}")
         print(f"Saved summary: {os.path.join(output_folder, 'metrics_summary.txt')}")
     else:
         print("No matching image pairs found.")
 
 
-# ================= 5. 入口 / Entry point =================
 if __name__ == "__main__":
     epochs = 100
-    # --- 第一步：训练数据路径 / Step 1: training data paths ---
-    # 用于训练的图像和 GT 标注 / Images and GT used for training
-    train_imgs = '/Users/phoenix/Desktop/AOGs Detection/Train and Test/train/images/'
-    train_gt = '/Users/phoenix/Desktop/AOGs Detection/Train and Test/train/GT/'
 
-    # --- 第二步：测试数据路径 / Step 2: test data paths ---
-    # 用于评估的保留测试集 / Held-out images for evaluation
-    test_imgs = '/Users/phoenix/Desktop/AOGs Detection/Train and Test/test/images/'
-    test_gt = '/Users/phoenix/Desktop/AOGs Detection/Train and Test/test/GT/'
+    train_imgs = "/Users/phoenix/Desktop/AOGs Detection/Train and Test/train/images/"
+    train_gt = "/Users/phoenix/Desktop/AOGs Detection/Train and Test/train/GT/"
 
-    # --- 第三步：自动生成结果目录 / Step 3: auto-generate result output folder ---
+    test_imgs = "/Users/phoenix/Desktop/AOGs Detection/Train and Test/test/images/"
+    test_gt = "/Users/phoenix/Desktop/AOGs Detection/Train and Test/test/GT/"
+
     base_results_dir = os.path.join("outputs", "unet_results")
     os.makedirs(base_results_dir, exist_ok=True)
-    run_name = f"unet1_train_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # UNet++ specific experiment folder naming
+    run_name = f"unetpp_resnet34_train_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     result_folder = os.path.join(base_results_dir, run_name)
     print("=" * 60)
-    print(f"UNet1 result folder: {result_folder}")
+    print(f"UNetPP_resnet34 result folder: {result_folder}")
     print("=" * 60)
-    # ------------------------------------------------------------
 
-    # 1. 仅在训练集上训练 / Train on training set only
     if not os.path.exists(train_imgs):
-        print("❌ Error: training path does not exist.")
+        print("Error: training path does not exist.")
     else:
         seed = 42
-        random.seed(seed)  # 固定随机种子，保证可复现 / Fix seed for reproducibility
+        random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+
         full_dataset = AOGDataset(img_dir=train_imgs, mask_dir=train_gt, augment=False)
         n = len(full_dataset)
         idxs = list(range(n))
         random.shuffle(idxs)
-        split = int(n * 0.8)  # 80% 训练 / 20% 验证 / 80% train, 20% val
+        split = int(n * 0.8)
 
-        # 训练集启用增强；验证集不启用增强
         train_dataset = AOGDataset(img_dir=train_imgs, mask_dir=train_gt, augment=True)
-        val_dataset   = AOGDataset(img_dir=train_imgs, mask_dir=train_gt, augment=False)
+        val_dataset = AOGDataset(img_dir=train_imgs, mask_dir=train_gt, augment=False)
 
         train_sub = Subset(train_dataset, idxs[:split])
-        val_sub   = Subset(val_dataset, idxs[split:])
+        val_sub = Subset(val_dataset, idxs[split:])
         train_loader = DataLoader(train_sub, batch_size=16, shuffle=True)
-        val_loader   = DataLoader(val_sub,   batch_size=16, shuffle=False)
+        val_loader = DataLoader(val_sub, batch_size=16, shuffle=False)
 
-        # 模型在此处创建，避免 import 时触发权重下载 / Model created here to avoid download on import
-        model = smp.Unet(encoder_name="resnet34", encoder_weights="imagenet",
-                 in_channels=3, classes=1, activation='sigmoid')
+        # UNet++ specific model definition
+        model = smp.UnetPlusPlus(
+            encoder_name="resnet34",
+            encoder_weights="imagenet",
+            in_channels=3,
+            classes=1,
+            activation="sigmoid",
+        )
+
+        best_ckpt_path = os.path.join(result_folder, "best_model_unetpp_resnet34.pth")
 
         experiment_config = {
-            "script": "UNet1.py",
+            "script": "UNetPP_resnet34.py",
             "model": {
-                "name": "smp.Unet",
+                "name": "UNetPP_resnet34",
+                "arch": "smp.UnetPlusPlus",
                 "encoder_name": "resnet34",
                 "encoder_weights": "imagenet",
                 "in_channels": 3,
@@ -591,7 +566,7 @@ if __name__ == "__main__":
             },
             "outputs": {
                 "result_folder": result_folder,
-                "best_checkpoint": os.path.join(result_folder, "best_model_unet1.pth"),
+                "best_checkpoint": best_ckpt_path,
                 "artifacts": [
                     "masks/",
                     "overlays/",
@@ -601,14 +576,12 @@ if __name__ == "__main__":
                     "confusion_matrix.png",
                     "confusion_matrix.txt",
                     "gt_pred_area_count_compare.csv",
-                    "gt_pred_area_count_compare.png"
+                    "gt_pred_area_count_compare.png",
                 ],
             },
         }
         save_experiment_config(result_folder, experiment_config)
 
-        # 训练循环 / Training loop
-        best_ckpt_path = os.path.join(result_folder, "best_model_unet1.pth")
         train_model(
             model,
             train_loader,
@@ -617,12 +590,10 @@ if __name__ == "__main__":
             best_ckpt_path=best_ckpt_path,
         )
 
-        # 使用验证集最佳模型进行最终测试评估（不使用最后一个 epoch 模型）
         if os.path.exists(best_ckpt_path):
             model.load_state_dict(torch.load(best_ckpt_path, map_location=get_device()))
             print(f"Loaded best checkpoint for final test: {best_ckpt_path}")
         else:
             raise FileNotFoundError(f"Best checkpoint not found: {best_ckpt_path}")
 
-        # 2. 在测试集上批量预测与评分 / Batch predict & score on test set
         batch_process_and_evaluate(model, test_imgs, test_gt, result_folder)
