@@ -1,6 +1,7 @@
 import os
 import random
 import json
+import argparse
 from datetime import datetime
 
 import cv2
@@ -13,7 +14,13 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, Subset
 
 
-EVAL_THRESHOLD = 0.4
+EVAL_THRESHOLD = 0.3
+
+
+def _threshold_tag(threshold):
+    """Convert numeric threshold to a folder-safe tag, e.g. 0.4 -> 0p4."""
+    value = f"{threshold:.4f}".rstrip("0").rstrip(".")
+    return value.replace(".", "p")
 
 
 def save_experiment_config(output_folder, config):
@@ -310,6 +317,40 @@ def _write_gt_pred_compare(output_folder, rows):
     plt.close()
 
 
+def _save_gt_pred_image_compare(items, out_path, max_items=12):
+    """Save a qualitative GT-vs-Pred mask panel (worst Dice samples first)."""
+    if not items:
+        return
+
+    # Show harder cases first so qualitative errors are easy to inspect.
+    items_sorted = sorted(items, key=lambda x: x["dice"])
+    show_items = items_sorted[:max_items]
+
+    n = len(show_items)
+    fig, axes = plt.subplots(n, 2, figsize=(8, max(2.5 * n, 4)))
+    if n == 1:
+        axes = np.array([axes])
+
+    for i, item in enumerate(show_items):
+        gt_mask = item["gt_mask"]
+        pred_mask = item["pred_mask"]
+        name = item["filename"]
+        dice = item["dice"]
+
+        axes[i, 0].imshow(gt_mask, cmap="gray", vmin=0, vmax=255)
+        axes[i, 0].set_title(f"GT | {name}", fontsize=9)
+        axes[i, 0].axis("off")
+
+        axes[i, 1].imshow(pred_mask, cmap="gray", vmin=0, vmax=255)
+        axes[i, 1].set_title(f"Pred | Dice={dice:.3f}", fontsize=9)
+        axes[i, 1].axis("off")
+
+    fig.suptitle("GT vs Prediction Mask Comparison", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close()
+
+
 def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
     device = get_device()
     model.to(device)
@@ -330,6 +371,7 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
     total_aog_count = 0
     total_gt_aog_count = 0
     rows = []
+    gt_pred_vis_items = []
 
     all_y_true = []
     all_y_score = []
@@ -407,6 +449,12 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
             "gt_aog_area_percent": gt_area,
             "gt_aog_count": gt_aog_count,
         })
+        gt_pred_vis_items.append({
+            "filename": stem,
+            "dice": dice,
+            "gt_mask": gt_img.copy(),
+            "pred_mask": res_mask.copy(),
+        })
 
         total_metrics["iou"] += iou
         total_metrics["dice"] += dice
@@ -465,12 +513,17 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
             f.write(f"TP: {cm_tp}\n")
 
         _write_gt_pred_compare(output_folder, rows)
+        _save_gt_pred_image_compare(
+            gt_pred_vis_items,
+            os.path.join(output_folder, "gt_pred_image_compare.png"),
+        )
 
         print(f"Saved PR curve: {os.path.join(output_folder, 'pr_curve.png')}")
         print(f"Saved confusion matrix: {os.path.join(output_folder, 'confusion_matrix.png')}")
         print(
             f"Saved GT-vs-Pred area/count comparison: {os.path.join(output_folder, 'gt_pred_area_count_compare.png')}"
         )
+        print(f"Saved GT-vs-Pred image comparison: {os.path.join(output_folder, 'gt_pred_image_compare.png')}")
         print(f"Saved metrics: {os.path.join(output_folder, 'metrics_per_image.csv')}")
         print(f"Saved summary: {os.path.join(output_folder, 'metrics_summary.txt')}")
     else:
@@ -478,6 +531,17 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train/evaluate UNet++ (ResNet34) for AOG segmentation.")
+    parser.add_argument(
+        "--eval-threshold",
+        type=float,
+        default=EVAL_THRESHOLD,
+        help="Binarization threshold for validation/test metrics and masks.",
+    )
+    args = parser.parse_args()
+
+    # Allow threshold override from CLI for multi-threshold experiments.
+    EVAL_THRESHOLD = float(args.eval_threshold)
     epochs = 100
 
     train_imgs = "/Users/phoenix/Desktop/AOGs Detection/Train and Test/train/images/"
@@ -488,9 +552,13 @@ if __name__ == "__main__":
 
     base_results_dir = os.path.join("outputs", "unet_results")
     os.makedirs(base_results_dir, exist_ok=True)
+    print(f"Using eval threshold: {EVAL_THRESHOLD}")
 
     # UNet++ specific experiment folder naming
-    run_name = f"unetpp_resnet34_train_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_name = (
+        f"unetpp_resnet34_thr{_threshold_tag(EVAL_THRESHOLD)}_"
+        f"train_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
     result_folder = os.path.join(base_results_dir, run_name)
     print("=" * 60)
     print(f"UNetPP_resnet34 result folder: {result_folder}")
@@ -577,6 +645,7 @@ if __name__ == "__main__":
                     "confusion_matrix.txt",
                     "gt_pred_area_count_compare.csv",
                     "gt_pred_area_count_compare.png",
+                    "gt_pred_image_compare.png",
                 ],
             },
         }
