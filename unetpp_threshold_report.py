@@ -3,13 +3,12 @@ import glob
 import json
 import os
 import re
+import argparse
 from pathlib import Path
 
 
-RESULTS_ROOT = Path("outputs/unet_results")
-OUT_CSV = RESULTS_ROOT / "unetpp_threshold_comparison_latest.csv"
-OUT_MD = RESULTS_ROOT / "unetpp_threshold_comparison_latest.md"
-GT_REF = RESULTS_ROOT / "gt_test_reference_stats.json"
+DEFAULT_BASE_ROOT = Path("outputs/unet_results")
+DEFAULT_COMPARE_SUBDIR = "Compare2"
 
 
 def parse_threshold_from_dirname(name: str):
@@ -38,10 +37,10 @@ def load_gt_ref(path: Path):
         return json.load(f)
 
 
-def collect_latest_runs_by_threshold():
+def collect_latest_runs_by_threshold(results_root: Path):
     runs = [
         Path(p)
-        for p in glob.glob(str(RESULTS_ROOT / "unetpp_resnet34_thr*_train_eval_*"))
+        for p in glob.glob(str(results_root / "unetpp_resnet34_thr*_train_eval_*"))
         if os.path.isdir(p)
     ]
 
@@ -63,15 +62,52 @@ def as_float(s, default=float("nan")):
         return default
 
 
-def main():
-    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+def resolve_gt_ref(results_root: Path):
+    # Prefer GT reference in current report folder, then parent folder.
+    local = results_root / "gt_test_reference_stats.json"
+    if local.exists():
+        return local
 
-    latest = collect_latest_runs_by_threshold()
+    parent = results_root.parent / "gt_test_reference_stats.json"
+    if parent.exists():
+        return parent
+
+    base = DEFAULT_BASE_ROOT / "gt_test_reference_stats.json"
+    if base.exists():
+        return base
+
+    return local
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate UNetPP threshold comparison report from a target experiment folder."
+    )
+    parser.add_argument(
+        "--results-root",
+        default="",
+        help="Target folder containing UNetPP threshold runs. If empty, auto-uses outputs/unet_results/Compare2 when present.",
+    )
+    args = parser.parse_args()
+
+    if args.results_root:
+        results_root = Path(args.results_root)
+    else:
+        compare2 = DEFAULT_BASE_ROOT / DEFAULT_COMPARE_SUBDIR
+        results_root = compare2 if compare2.exists() else DEFAULT_BASE_ROOT
+
+    results_root.mkdir(parents=True, exist_ok=True)
+
+    out_csv = results_root / "unetpp_threshold_comparison_latest.csv"
+    out_md = results_root / "unetpp_threshold_comparison_latest.md"
+    gt_ref_path = resolve_gt_ref(results_root)
+
+    latest = collect_latest_runs_by_threshold(results_root)
     if not latest:
-        print("No UNetPP threshold runs found.")
+        print(f"No UNetPP threshold runs found under: {results_root}")
         return
 
-    gt_ref = load_gt_ref(GT_REF)
+    gt_ref = load_gt_ref(gt_ref_path)
     gt_area = gt_ref.get("mean_aog_area_percent") if gt_ref else None
     gt_count = gt_ref.get("mean_aog_count") if gt_ref else None
 
@@ -149,7 +185,7 @@ def main():
         "best_count_error",
     ]
 
-    with open(OUT_CSV, "w", encoding="utf-8", newline="") as f:
+    with open(out_csv, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=headers)
         w.writeheader()
         for r in rows:
@@ -162,7 +198,7 @@ def main():
             return f"{v:.6f}"
         return str(v)
 
-    with open(OUT_MD, "w", encoding="utf-8") as f:
+    with open(out_md, "w", encoding="utf-8") as f:
         f.write("# UNetPP Threshold Comparison (Latest Runs)\n\n")
         f.write("| " + " | ".join(headers) + " |\n")
         f.write("|" + "|".join(["---"] * len(headers)) + "|\n")
@@ -178,8 +214,10 @@ def main():
         else:
             f.write("- GT reference not found; area/count error ranking skipped.\n")
 
-    print(f"Saved: {OUT_CSV}")
-    print(f"Saved: {OUT_MD}")
+    print(f"Report root: {results_root}")
+    print(f"GT reference: {gt_ref_path}")
+    print(f"Saved: {out_csv}")
+    print(f"Saved: {out_md}")
 
 
 if __name__ == "__main__":

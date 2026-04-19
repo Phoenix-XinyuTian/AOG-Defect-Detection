@@ -14,7 +14,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, Subset
 
 
-EVAL_THRESHOLD = 0.3
+EVAL_THRESHOLD = 0.4
+MIN_COMPONENT_AREA = 0
 
 
 def _threshold_tag(threshold):
@@ -80,6 +81,24 @@ class AOGDataset(Dataset):
                 image = np.ascontiguousarray(np.rot90(image, k=k))
                 mask = np.ascontiguousarray(np.rot90(mask, k=k))
 
+            # Image-only augmentation: random brightness scaling.
+            brightness = random.uniform(0.7, 1.3)
+            image = np.clip(image.astype(np.float32) * brightness, 0, 255)
+
+            # Image-only augmentation: random Gaussian noise.
+            noise_std = random.uniform(5.0, 20.0)
+            noise = np.random.normal(0.0, noise_std, image.shape)
+            image = np.clip(image + noise, 0, 255)
+
+            # Image-only augmentation: random CLAHE contrast variation.
+            clip_limit = random.uniform(1.0, 4.0)
+            clahe_aug = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+            aug_image = np.zeros_like(image, dtype=np.uint8)
+            image_u8 = image.astype(np.uint8)
+            for c in range(3):
+                aug_image[:, :, c] = clahe_aug.apply(image_u8[:, :, c])
+            image = aug_image
+
         image = image.transpose(2, 0, 1) / 255.0
         mask = (mask > 0).astype(np.float32)
         mask = np.expand_dims(mask, axis=0)
@@ -103,19 +122,28 @@ def calculate_metrics(pred_mask, gt_mask):
     return iou, dice, precision, recall, f1
 
 
-def bce_dice_loss(prob, target, eps=1e-6):
-    # BCE part: pixel-wise binary classification
-    bce = nn.functional.binary_cross_entropy(prob, target)
-
-    # Dice part: overlap loss for foreground
+def loss_fn(prob, target, eps=1e-6):
+    # Tversky loss: alpha=0.4, beta=0.6.
+    alpha = 0.4
+    beta = 0.6
     prob_f = prob.view(prob.size(0), -1)
     tgt_f = target.view(target.size(0), -1)
-    inter = (prob_f * tgt_f).sum(dim=1)
-    dice = (2.0 * inter + eps) / (prob_f.sum(dim=1) + tgt_f.sum(dim=1) + eps)
-    dice_loss = 1.0 - dice.mean()
 
-    # Final combined loss
-    return bce + dice_loss
+    tp = (prob_f * tgt_f).sum(dim=1)
+    fp = (prob_f * (1.0 - tgt_f)).sum(dim=1)
+    fn = ((1.0 - prob_f) * tgt_f).sum(dim=1)
+    tversky = (tp + eps) / (tp + alpha * fp + beta * fn + eps)
+    tversky_loss = 1.0 - tversky.mean()
+
+    # Binary focal loss on probabilities: gamma=2.0, pos_weight=10.0.
+    gamma = 2.0
+    pos_weight = 10.0
+    p_t = prob * target + (1.0 - prob) * (1.0 - target)
+    alpha_t = pos_weight * target + (1.0 - target)
+    focal = -alpha_t * torch.pow(1.0 - p_t, gamma) * torch.log(p_t.clamp(min=eps, max=1.0 - eps))
+    focal_loss = focal.mean()
+
+    return focal_loss + tversky_loss
 
 
 def get_device():
@@ -137,7 +165,8 @@ def train_model(model, train_loader, val_loader=None, epochs=20, best_ckpt_path=
 
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    criterion = bce_dice_loss
+    criterion = loss_fn
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
     print(f"Training on {device}...")
 
     best_val_dice = -1.0
@@ -156,6 +185,7 @@ def train_model(model, train_loader, val_loader=None, epochs=20, best_ckpt_path=
             epoch_loss += loss.item()
 
         train_loss = epoch_loss / len(train_loader)
+        current_lr = optimizer.param_groups[0]["lr"]
 
         if val_loader is not None:
             model.eval()
@@ -182,7 +212,7 @@ def train_model(model, train_loader, val_loader=None, epochs=20, best_ckpt_path=
             val_rec = sum(val_recs) / len(val_recs)
 
             print(
-                f"Epoch {epoch + 1:03d}/{epochs} | train_loss={train_loss:.4f} "
+                f"Epoch {epoch + 1:03d}/{epochs} | train_loss={train_loss:.4f} | lr={current_lr:.6e} "
                 f"| Dice={val_dice:.4f} | IoU={val_iou:.4f} "
                 f"| F1={val_f1:.4f} | Prec={val_prec:.4f} | Rec={val_rec:.4f}"
             )
@@ -197,7 +227,9 @@ def train_model(model, train_loader, val_loader=None, epochs=20, best_ckpt_path=
                 )
         else:
             if (epoch + 1) % 5 == 0:
-                print(f"Epoch {epoch + 1}/{epochs}, Loss: {train_loss:.4f}")
+                print(f"Epoch {epoch + 1}/{epochs}, Loss: {train_loss:.4f}, lr={current_lr:.6e}")
+
+        scheduler.step()
 
     if val_loader is not None:
         print(f"Training finished. Best val Dice = {best_val_dice:.4f} at epoch {best_epoch:03d}")
@@ -351,6 +383,18 @@ def _save_gt_pred_image_compare(items, out_path, max_items=12):
     plt.close()
 
 
+def _remove_small_components(mask_uint8, min_area=MIN_COMPONENT_AREA):
+    if min_area <= 0:
+        return mask_uint8
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_uint8, connectivity=8)
+    cleaned = np.zeros_like(mask_uint8)
+    for i in range(1, num_labels):
+        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+            cleaned[labels == i] = 255
+    return cleaned
+
+
 def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
     device = get_device()
     model.to(device)
@@ -409,6 +453,7 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
 
         res_mask = (pred_prob > EVAL_THRESHOLD).astype(np.uint8) * 255
         res_mask = cv2.resize(res_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        res_mask = _remove_small_components(res_mask, min_area=MIN_COMPONENT_AREA)
 
         gt_img = cv2.imread(gt_path, cv2.IMREAD_GRAYSCALE)
         iou, dice, prec, rec, f1 = calculate_metrics(res_mask, gt_img)
@@ -614,8 +659,9 @@ if __name__ == "__main__":
                 "batch_size": 16,
                 "learning_rate": 1e-4,
                 "optimizer": "Adam",
-                "loss": "BCE + Dice (on probability output)",
+                "loss": "Focal (gamma=2.0,pos_weight=10.0) + Tversky (alpha=0.4,beta=0.6)",
                 "eval_threshold": EVAL_THRESHOLD,
+                "min_component_area": MIN_COMPONENT_AREA,
                 "val_ratio": 0.2,
                 "train_augment": True,
                 "val_augment": False,
