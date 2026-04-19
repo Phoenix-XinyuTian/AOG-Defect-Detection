@@ -1,0 +1,29 @@
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#f5f5f5','primaryTextColor':'#111111','lineColor':'#333333'}}}%%
+flowchart TB
+    A[Input SEM Image] --> B[Preprocess<br/>Resize + Median Blur + CLAHE]
+    B --> C[1-channel Tensor<br/>1x256x256]
+
+    subgraph UNet[Basic U-Net (custom)]
+      C --> D1[Encoder Block 1<br/>DoubleConv]
+      D1 --> P1[MaxPool]
+      P1 --> D2[Encoder Block 2<br/>DoubleConv]
+      D2 --> P2[MaxPool]
+      P2 --> D3[Encoder Block 3<br/>DoubleConv]
+      D3 --> P3[MaxPool]
+      P3 --> BN[Bottleneck<br/>DoubleConv]
+      BN --> U3[UpConv]
+      U3 --> CAT3[Concat Skip 3]
+      CAT3 --> DC3[DoubleConv]
+      DC3 --> U2[UpConv]
+      U2 --> CAT2[Concat Skip 2]
+      CAT2 --> DC2[DoubleConv]
+      DC2 --> U1[UpConv]
+      U1 --> CAT1[Concat Skip 1]
+      CAT1 --> DC1[DoubleConv]
+      DC1 --> OUT[1x1 Conv<br/>Logits]
+    end
+
+    OUT --> S[Sigmoid]
+    S --> T[Threshold (0.4)]
+    T --> M[Predicted Mask]
+    M --> N[Metrics + Visualization]

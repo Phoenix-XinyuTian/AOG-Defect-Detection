@@ -13,6 +13,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, Subset
 
+from src.data.unetpp_data_policy import preprocess_bgr_unetpp, augment_bgr_mask_unetpp
+
 
 EVAL_THRESHOLD = 0.4
 MIN_COMPONENT_AREA = 0
@@ -58,46 +60,12 @@ class AOGDataset(Dataset):
         if image is None or mask is None:
             raise FileNotFoundError(f"Failed to load: {img_name}")
 
-        image = cv2.resize(image, self.img_size)
+        image = preprocess_bgr_unetpp(image, img_size=self.img_size, clahe=self._clahe)
         mask = cv2.resize(mask, self.img_size, interpolation=cv2.INTER_NEAREST)
-
-        # Keep existing preprocessing: resize -> median blur -> CLAHE
-        image_proc = np.zeros_like(image)
-        for c in range(3):
-            ch = cv2.medianBlur(image[:, :, c], 3)
-            image_proc[:, :, c] = self._clahe.apply(ch)
-        image = image_proc
 
         # Training-only geometric augmentation (shared transform for image/mask)
         if self.augment:
-            if random.random() < 0.5:
-                image = cv2.flip(image, 1)
-                mask = cv2.flip(mask, 1)
-            if random.random() < 0.5:
-                image = cv2.flip(image, 0)
-                mask = cv2.flip(mask, 0)
-            if random.random() < 0.5:
-                k = random.randint(1, 3)
-                image = np.ascontiguousarray(np.rot90(image, k=k))
-                mask = np.ascontiguousarray(np.rot90(mask, k=k))
-
-            # Image-only augmentation: random brightness scaling.
-            brightness = random.uniform(0.7, 1.3)
-            image = np.clip(image.astype(np.float32) * brightness, 0, 255)
-
-            # Image-only augmentation: random Gaussian noise.
-            noise_std = random.uniform(5.0, 20.0)
-            noise = np.random.normal(0.0, noise_std, image.shape)
-            image = np.clip(image + noise, 0, 255)
-
-            # Image-only augmentation: random CLAHE contrast variation.
-            clip_limit = random.uniform(1.0, 4.0)
-            clahe_aug = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-            aug_image = np.zeros_like(image, dtype=np.uint8)
-            image_u8 = image.astype(np.uint8)
-            for c in range(3):
-                aug_image[:, :, c] = clahe_aug.apply(image_u8[:, :, c])
-            image = aug_image
+            image, mask = augment_bgr_mask_unetpp(image, mask)
 
         image = image.transpose(2, 0, 1) / 255.0
         mask = (mask > 0).astype(np.float32)
@@ -437,13 +405,7 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
 
         ori_img = cv2.imread(img_path)
         h, w = ori_img.shape[:2]
-        resized = cv2.resize(ori_img, (256, 256))
-
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        proc = np.zeros_like(resized)
-        for c in range(3):
-            ch = cv2.medianBlur(resized[:, :, c], 3)
-            proc[:, :, c] = clahe.apply(ch)
+        proc = preprocess_bgr_unetpp(ori_img, img_size=(256, 256))
 
         img_tensor = proc.transpose(2, 0, 1) / 255.0
         img_tensor = torch.tensor(img_tensor).unsqueeze(0).float().to(device)

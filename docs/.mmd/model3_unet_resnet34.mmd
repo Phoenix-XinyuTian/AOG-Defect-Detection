@@ -1,0 +1,16 @@
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#f5f5f5','primaryTextColor':'#111111','lineColor':'#333333'}}}%%
+flowchart TB
+    A[Input SEM Image] --> B[Preprocess<br/>Resize + Median Blur + CLAHE<br/>(3 channels)]
+    B --> C[Training Augment<br/>Flip/Rotate + Brightness + Noise + Random CLAHE]
+    C --> D[Tensor<br/>3x256x256]
+
+    subgraph SMPU[smp.Unet]
+      D --> E[Encoder: ResNet34<br/>(ImageNet weights)]
+      E --> F[UNet Decoder<br/>(skip fusion)]
+      F --> G[Segmentation Head<br/>1 channel]
+      G --> H[Sigmoid Output]
+    end
+
+    H --> I[Threshold (0.4)]
+    I --> J[Binary Mask]
+    J --> K[Overlay + Metrics<br/>IoU/Dice/F1/Precision/Recall<br/>Area%/Count]

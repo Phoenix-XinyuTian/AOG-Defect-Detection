@@ -1,0 +1,11 @@
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#f5f5f5','primaryTextColor':'#111111','lineColor':'#333333'}}}%%
+flowchart TB
+    A[Input SEM Image] --> B[Resize to 256x256]
+    B --> C[Median Blur]
+    C --> D[CLAHE]
+    D --> E[Global Intensity Threshold]
+    E --> F[Morphological Open + Close]
+    F --> G[Connected Component Filtering<br/>(min_area)]
+    G --> H[Binary AOG Mask]
+    H --> I[Overlay Generation]
+    H --> J[Metric Computation<br/>(IoU, Dice, F1, Precision, Recall)]

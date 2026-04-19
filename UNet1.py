@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import segmentation_models_pytorch as smp
+from src.data.unetpp_data_policy import preprocess_bgr_unetpp, augment_bgr_mask_unetpp
 
 EVAL_THRESHOLD = 0.4
 
@@ -48,30 +49,13 @@ class AOGDataset(Dataset):
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if image is None or mask is None: raise FileNotFoundError(f"Failed to load: {img_name}")
-        image = cv2.resize(image, self.img_size)
+        image = preprocess_bgr_unetpp(image, img_size=self.img_size, clahe=self._clahe)
         mask = cv2.resize(mask, self.img_size, interpolation=cv2.INTER_NEAREST)
-
-        # 与主管线一致的预处理：中值滤波 + CLAHE（逐通道）
-        # Preprocessing consistent with main pipeline: median blur + CLAHE (per channel)
-        image_proc = np.zeros_like(image)
-        for c in range(3):
-            ch = cv2.medianBlur(image[:, :, c], 3)
-            image_proc[:, :, c] = self._clahe.apply(ch)
-        image = image_proc
 
         # ---- 训练集专用增强 / Training-only augmentation ----
         # 仅对训练样本启用，且对 image/mask 执行完全相同的几何变换。
         if self.augment:
-            if random.random() < 0.5:
-                image = cv2.flip(image, 1)
-                mask = cv2.flip(mask, 1)
-            if random.random() < 0.5:
-                image = cv2.flip(image, 0)
-                mask = cv2.flip(mask, 0)
-            if random.random() < 0.5:
-                k = random.randint(1, 3)  # 1/2/3 -> 90/180/270 degrees
-                image = np.ascontiguousarray(np.rot90(image, k=k))
-                mask = np.ascontiguousarray(np.rot90(mask, k=k))
+            image, mask = augment_bgr_mask_unetpp(image, mask)
 
         image = image.transpose(2, 0, 1) / 255.0
         # 保持掩码二值 / Keep mask binary after augmentation
@@ -406,13 +390,8 @@ def batch_process_and_evaluate(model, input_folder, gt_folder, output_folder):
         # 1. 模型推理 / Inference
         ori_img = cv2.imread(img_path)
         h, w = ori_img.shape[:2]
-        resized = cv2.resize(ori_img, (256, 256))
-        # 推理预处理与训练一致：中值滤波 + CLAHE / Inference preprocessing consistent with training
-        _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        proc = np.zeros_like(resized)
-        for c in range(3):
-            ch = cv2.medianBlur(resized[:, :, c], 3)
-            proc[:, :, c] = _clahe.apply(ch)
+        # 推理预处理与训练一致：调用统一 UNetPP 数据策略。
+        proc = preprocess_bgr_unetpp(ori_img, img_size=(256, 256))
         img_tensor = proc.transpose(2, 0, 1) / 255.0
         img_tensor = torch.tensor(img_tensor).unsqueeze(0).float().to(device)
 
