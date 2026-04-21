@@ -1,5 +1,27 @@
 # Model Architecture Diagrams (White Background)
 
+## PNG Previews (Ready for Paper)
+
+### 1) Intensity Baseline
+
+![Model 1 Intensity](figures/model1_intensity.png)
+
+### 2) Basic U-Net (Custom)
+
+![Model 2 Basic U-Net](figures/model2_unet_basic.png)
+
+### 3) ResNet34 U-Net (SMP)
+
+![Model 3 ResNet34 U-Net](figures/model3_unet_resnet34.png)
+
+### 4) ResNet34 U-Net++ (SMP)
+
+![Model 4 ResNet34 U-Net++](figures/model4_unetpp_resnet34.png)
+
+---
+
+## Mermaid Source
+
 ## 1) Intensity Baseline
 
 ```mermaid

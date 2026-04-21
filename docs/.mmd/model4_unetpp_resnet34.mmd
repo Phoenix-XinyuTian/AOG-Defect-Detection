@@ -1,18 +1,18 @@
 %%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#f5f5f5','primaryTextColor':'#111111','lineColor':'#333333'}}}%%
 flowchart TB
-    A[Input SEM Image] --> B[Preprocess<br/>Resize + Median Blur + CLAHE<br/>(3 channels)]
-    B --> C[Training Augment<br/>Flip/Rotate + Brightness + Noise + Random CLAHE]
-    C --> D[Tensor<br/>3x256x256]
+    A[Input SEM Image] --> B[Preprocess Resize MedianBlur CLAHE 3ch]
+    B --> C[Augment Flip Rotate Brightness Noise RandomCLAHE]
+    C --> D[Tensor 3x256x256]
 
     subgraph SMPUPP[smp.UnetPlusPlus]
-      D --> E[Encoder: ResNet34<br/>(ImageNet weights)]
-      E --> F[Nested Dense Skip Paths<br/>(UNet++ decoder)]
-      F --> G[Segmentation Head<br/>1 channel]
+      D --> E[Encoder ResNet34 ImageNet]
+      E --> F[Nested Dense Skip Paths UNetPP Decoder]
+      F --> G[Segmentation Head 1ch]
       G --> H[Sigmoid Output]
     end
 
-    H --> I[Loss (train)<br/>Focal + Tversky<br/>(alpha=0.4, beta=0.6)]
-    H --> J[Threshold (e.g., 0.4)]
-    J --> K[Postprocess<br/>Connected Component Filter<br/>(min_area)]
+    H --> I[Train Loss Focal plus Tversky]
+    H --> J[Threshold 0.4]
+    J --> K[Postprocess Connected Component Filtering]
     K --> L[Binary Mask]
-    L --> M[Overlay + Metrics<br/>IoU/Dice/F1/Precision/Recall<br/>Area%/Count]
+    L --> M[Overlay and Metrics]
