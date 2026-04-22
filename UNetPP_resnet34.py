@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from src.data.unetpp_data_policy import preprocess_bgr_unetpp, augment_bgr_mask_unetpp
 
 
-EVAL_THRESHOLD = 0.4
+EVAL_THRESHOLD = 0.45
 MIN_COMPONENT_AREA = 0
 
 
@@ -91,9 +91,9 @@ def calculate_metrics(pred_mask, gt_mask):
 
 
 def loss_fn(prob, target, eps=1e-6):
-    # Tversky loss: alpha=0.4, beta=0.6.
-    alpha = 0.4
-    beta = 0.6
+    # Tversky loss: alpha=0.45, beta=0.55.
+    alpha = 0.45
+    beta = 0.55
     prob_f = prob.view(prob.size(0), -1)
     tgt_f = target.view(target.size(0), -1)
 
@@ -105,7 +105,7 @@ def loss_fn(prob, target, eps=1e-6):
 
     # Binary focal loss on probabilities: gamma=2.0, pos_weight=10.0.
     gamma = 2.0
-    pos_weight = 10.0
+    pos_weight = 7.0
     p_t = prob * target + (1.0 - prob) * (1.0 - target)
     alpha_t = pos_weight * target + (1.0 - target)
     focal = -alpha_t * torch.pow(1.0 - p_t, gamma) * torch.log(p_t.clamp(min=eps, max=1.0 - eps))

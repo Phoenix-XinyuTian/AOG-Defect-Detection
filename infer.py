@@ -25,6 +25,26 @@ def save_overlay(gray01, pred01, out_path, alpha=0.5):
     cv2.imwrite(out_path, overlay)
 
 
+def _prepare_visual_outputs(images_dir, name, pred):
+    """
+    Build mask/overlay visualization data using the original input image path.
+    This keeps Basic UNet overlay background consistent with UNet++ pipelines.
+    """
+    pred_u8 = (pred * 255).astype(np.uint8)
+    img_path = os.path.join(images_dir, name)
+    orig_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+
+    if orig_gray is None:
+        # Fallback to model-input scale if original image cannot be read.
+        return pred_u8, pred, None
+
+    h, w = orig_gray.shape[:2]
+    pred_resized_u8 = cv2.resize(pred_u8, (w, h), interpolation=cv2.INTER_NEAREST)
+    pred_resized_bin = (pred_resized_u8 > 0).astype(np.uint8)
+    gray01 = orig_gray.astype(np.float32) / 255.0
+    return pred_resized_u8, pred_resized_bin, gray01
+
+
 def _write_metrics_files(output_folder, rows, summary):
     per_image_csv = os.path.join(output_folder, "metrics_per_image.csv")
     summary_txt = os.path.join(output_folder, "metrics_summary.txt")
@@ -94,9 +114,11 @@ def batch_process_and_evaluate(model, images_dir, masks_dir, output_folder, img_
 
                 mask_path = os.path.join(masks_out_dir, f"{stem}_pred.png")
                 overlay_path = os.path.join(overlays_out_dir, f"{stem}_overlay.png")
-                cv2.imwrite(mask_path, pred * 255)
-                gray01 = img[0].cpu().numpy()
-                save_overlay(gray01, pred, overlay_path)
+                pred_vis_u8, pred_vis_bin, gray01 = _prepare_visual_outputs(images_dir, name, pred)
+                cv2.imwrite(mask_path, pred_vis_u8)
+                if gray01 is None:
+                    gray01 = img[0].cpu().numpy()
+                save_overlay(gray01, pred_vis_bin, overlay_path)
 
                 rows.append({
                     "filename": stem,
@@ -141,10 +163,12 @@ def batch_process_and_evaluate(model, images_dir, masks_dir, output_folder, img_
                 stem = os.path.splitext(name)[0]
                 mask_path = os.path.join(masks_out_dir, f"{stem}_pred.png")
                 overlay_path = os.path.join(overlays_out_dir, f"{stem}_overlay.png")
-                cv2.imwrite(mask_path, pred * 255)
+                pred_vis_u8, pred_vis_bin, gray01 = _prepare_visual_outputs(images_dir, name, pred)
+                cv2.imwrite(mask_path, pred_vis_u8)
 
-                gray01 = img[0].cpu().numpy()
-                save_overlay(gray01, pred, overlay_path)
+                if gray01 is None:
+                    gray01 = img[0].cpu().numpy()
+                save_overlay(gray01, pred_vis_bin, overlay_path)
 
         print("Inference done (no GT). Saved masks & overlays.")
 

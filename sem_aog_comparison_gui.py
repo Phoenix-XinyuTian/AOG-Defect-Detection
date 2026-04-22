@@ -263,6 +263,7 @@ class SemAogComparisonApp:
         self.save_var = tk.StringVar(value=str(Path.cwd() / "comparison_figure.png"))
         self.preview_model_var = tk.StringVar(value="")
 
+        self.include_gt_var = tk.BooleanVar(value=True)
         self.include_pred_var = tk.BooleanVar(value=True)
         self.include_overlay_var = tk.BooleanVar(value=True)
         self.wspace_var = tk.StringVar(value="0.003")
@@ -295,6 +296,7 @@ class SemAogComparisonApp:
         options = ttk.Frame(controls)
         options.grid(row=3, column=0, columnspan=6, sticky="w", padx=2, pady=(6, 2))
         ttk.Label(options, text="Row output:").pack(side="left")
+        ttk.Checkbutton(options, text="GT row", variable=self.include_gt_var).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(options, text="Pred rows", variable=self.include_pred_var).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(options, text="Overlay rows", variable=self.include_overlay_var).pack(side="left", padx=(8, 0))
         ttk.Label(options, text="wspace:").pack(side="left", padx=(12, 2))
@@ -319,9 +321,9 @@ class SemAogComparisonApp:
         self.model_tree.heading("name", text="Model Label")
         self.model_tree.heading("overlay", text="Overlay Folder")
         self.model_tree.heading("mask", text="Mask Folder")
-        self.model_tree.column("name", width=110, anchor="w")
-        self.model_tree.column("overlay", width=180, anchor="w")
-        self.model_tree.column("mask", width=165, anchor="w")
+        self.model_tree.column("name", width=100, anchor="w")
+        self.model_tree.column("overlay", width=150, anchor="w")
+        self.model_tree.column("mask", width=150, anchor="w")
         self.model_tree.pack(fill="both", expand=True)
 
         model_tree_xsb = ttk.Scrollbar(model_panel, orient="horizontal", command=self.model_tree.xview)
@@ -330,9 +332,19 @@ class SemAogComparisonApp:
 
         model_btns = ttk.Frame(model_panel)
         model_btns.pack(fill="x", pady=(8, 0))
-        ttk.Button(model_btns, text="Add Model", command=self.on_add_model).pack(side="left")
-        ttk.Button(model_btns, text="Remove Selected", command=self.on_remove_model).pack(side="left", padx=(6, 0))
-        ttk.Button(model_btns, text="Rename Label", command=self.on_rename_model_label).pack(side="left", padx=(6, 0))
+        
+        # First row of buttons
+        model_btns_row1 = ttk.Frame(model_btns)
+        model_btns_row1.pack(fill="x", pady=(0, 4))
+        ttk.Button(model_btns_row1, text="Add Model", command=self.on_add_model).pack(side="left", padx=(0, 4))
+        ttk.Button(model_btns_row1, text="Remove Selected", command=self.on_remove_model).pack(side="left", padx=(0, 4))
+        ttk.Button(model_btns_row1, text="Rename Label", command=self.on_rename_model_label).pack(side="left")
+        
+        # Second row of buttons
+        model_btns_row2 = ttk.Frame(model_btns)
+        model_btns_row2.pack(fill="x")
+        ttk.Button(model_btns_row2, text="Move Up", command=self.on_move_model_up).pack(side="left", padx=(0, 4))
+        ttk.Button(model_btns_row2, text="Move Down", command=self.on_move_model_down).pack(side="left")
 
         # Middle: overlay selection list
         sample_panel = ttk.LabelFrame(body, text="Overlay Selection (select in desired left->right order)", padding=8)
@@ -370,8 +382,8 @@ class SemAogComparisonApp:
         # Keep preview readable when the main window is narrowed.
         self.preview_panel.configure(width=430)
         self.preview_panel.pack_propagate(False)
-        # Models panel is allowed to shrink first during horizontal resize.
-        self.model_panel.configure(width=300)
+        # Models panel with adequate width to display all content
+        self.model_panel.configure(width=440)
         self.model_panel.pack_propagate(False)
         self.body_frame.bind("<Configure>", self.on_body_resize)
 
@@ -701,6 +713,46 @@ class SemAogComparisonApp:
         self._save_last_models_setting()
         self._log(f"Renamed model label: {cur_label} -> {new_label}")
 
+    def on_move_model_up(self):
+        selected = self.model_tree.selection()
+        if not selected:
+            messagebox.showinfo("Move Up", "Please select a model to move.")
+            return
+
+        idx = int(selected[0])
+        if idx <= 0:
+            messagebox.showinfo("Move Up", "Cannot move up: already at top.")
+            return
+
+        # Swap with previous
+        self.models[idx], self.models[idx - 1] = self.models[idx - 1], self.models[idx]
+        self._refresh_model_tree()
+        self._update_preview_model_options()
+        self._rebuild_sample_list()
+        self._auto_update_save_filename()
+        self._save_last_models_setting()
+        self._log(f"Moved model up (now at position {idx})")
+
+    def on_move_model_down(self):
+        selected = self.model_tree.selection()
+        if not selected:
+            messagebox.showinfo("Move Down", "Please select a model to move.")
+            return
+
+        idx = int(selected[0])
+        if idx >= len(self.models) - 1:
+            messagebox.showinfo("Move Down", "Cannot move down: already at bottom.")
+            return
+
+        # Swap with next
+        self.models[idx], self.models[idx + 1] = self.models[idx + 1], self.models[idx]
+        self._refresh_model_tree()
+        self._update_preview_model_options()
+        self._rebuild_sample_list()
+        self._auto_update_save_filename()
+        self._save_last_models_setting()
+        self._log(f"Moved model down (now at position {idx + 2})")
+
     def on_browse_gt_folder(self):
         folder = filedialog.askdirectory(title="Choose GT folder")
         if folder:
@@ -821,6 +873,7 @@ class SemAogComparisonApp:
         selected_keys: List[str],
         gt_folder: Path,
         img_folder: Path,
+        include_gt: bool,
         include_pred: bool,
         include_overlay: bool,
     ) -> Tuple[List[Dict[str, Path]], List[Tuple[str, str]], List[str]]:
@@ -835,10 +888,15 @@ class SemAogComparisonApp:
         warnings: List[str] = []
         columns_data: List[Dict[str, Path]] = []
 
-        img_idx = build_key_index(img_folder)
-        gt_idx = build_key_index(gt_folder)
+        img_idx: Dict[str, Path] = {}
+        gt_idx: Dict[str, Path] = {}
+        if include_gt:
+            img_idx = build_key_index(img_folder)
+            gt_idx = build_key_index(gt_folder)
 
-        row_specs: List[Tuple[str, str]] = [("Image", "image"), ("GT", "gt")]
+        row_specs: List[Tuple[str, str]] = []
+        if include_gt:
+            row_specs.extend([("Image", "image"), ("GT", "gt")])
 
         if include_pred:
             for m in self.models:
@@ -856,19 +914,20 @@ class SemAogComparisonApp:
         for key in selected_keys:
             col: Dict[str, Path] = {}
 
-            img_path = img_idx.get(key)
-            gt_path = gt_idx.get(key)
-            if img_path is None or gt_path is None:
-                miss = []
-                if img_path is None:
-                    miss.append("Image")
-                if gt_path is None:
-                    miss.append("GT")
-                warnings.append(f"[{key}] missing -> {', '.join(miss)}")
-                continue
+            if include_gt:
+                img_path = img_idx.get(key)
+                gt_path = gt_idx.get(key)
+                if img_path is None or gt_path is None:
+                    miss = []
+                    if img_path is None:
+                        miss.append("Image")
+                    if gt_path is None:
+                        miss.append("GT")
+                    warnings.append(f"[{key}] missing -> {', '.join(miss)}")
+                    continue
 
-            col["image"] = img_path
-            col["gt"] = gt_path
+                col["image"] = img_path
+                col["gt"] = gt_path
 
             failed = False
             if include_pred:
@@ -904,20 +963,22 @@ class SemAogComparisonApp:
             messagebox.showwarning("No model", "Please add at least one model overlay folder.")
             return
 
+        include_gt = bool(self.include_gt_var.get())
         include_pred = bool(self.include_pred_var.get())
         include_overlay = bool(self.include_overlay_var.get())
-        if not include_pred and not include_overlay:
-            messagebox.showwarning("No output rows", "Please enable Pred rows and/or Overlay rows.")
+        if not include_gt and not include_pred and not include_overlay:
+            messagebox.showwarning("No output rows", "Please enable GT row, Pred rows, and/or Overlay rows.")
             return
 
         gt_folder = Path(self.gt_var.get().strip())
         img_folder = Path(self.img_var.get().strip())
-        if not gt_folder.exists() or not gt_folder.is_dir():
-            messagebox.showerror("Invalid GT folder", "GT folder does not exist.")
-            return
-        if not img_folder.exists() or not img_folder.is_dir():
-            messagebox.showerror("Invalid image folder", "Original image folder does not exist.")
-            return
+        if include_gt:
+            if not gt_folder.exists() or not gt_folder.is_dir():
+                messagebox.showerror("Invalid GT folder", "GT folder does not exist.")
+                return
+            if not img_folder.exists() or not img_folder.is_dir():
+                messagebox.showerror("Invalid image folder", "Original image folder does not exist.")
+                return
 
         selected_keys = self._get_selected_keys_in_order()
         if not selected_keys:
@@ -944,6 +1005,7 @@ class SemAogComparisonApp:
             selected_keys=selected_keys,
             gt_folder=gt_folder,
             img_folder=img_folder,
+            include_gt=include_gt,
             include_pred=include_pred,
             include_overlay=include_overlay,
         )
